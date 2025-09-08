@@ -1,76 +1,82 @@
 import os
+import io
+import base64
 import numpy as np
-from flask import Flask, request, jsonify
 from PIL import Image
+from flask import Flask, request, jsonify
 import tensorflow as tf
+import requests
 
 app = Flask(__name__)
 
+# GitHub Release model URL
+MODEL_URL = "https://github.com/Izzy-rblx/quickdraw-ai/releases/download/v1/quickdraw_model.keras"
 MODEL_PATH = "quickdraw_model.keras"
-model = None
 
-# Try loading the model
-if os.path.exists(MODEL_PATH):
-    try:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        print(f"✅ Successfully loaded model from {MODEL_PATH}")
-    except Exception as e:
-        print(f"❌ ERROR: Failed to load model from '{MODEL_PATH}': {e}")
-        model = None
-else:
-    print(f"❌ ERROR: Model file '{MODEL_PATH}' not found. Did render-build.sh download it?")
+# Download model if missing
+if not os.path.exists(MODEL_PATH):
+    print(f"⬇️ Downloading model from {MODEL_URL}...")
+    r = requests.get(MODEL_URL, stream=True)
+    if r.status_code == 200:
+        with open(MODEL_PATH, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        print("✅ Model downloaded successfully")
+    else:
+        raise RuntimeError(f"❌ Failed to download model: HTTP {r.status_code}")
 
-# Load categories (labels)
+# Load the model
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+    print("✅ Model loaded successfully")
+except Exception as e:
+    print(f"❌ ERROR: Failed to load model from '{MODEL_PATH}': {e}")
+    raise
+
+# Load categories
 CATEGORIES_FILE = "categories.txt"
-categories = []
 if os.path.exists(CATEGORIES_FILE):
     with open(CATEGORIES_FILE, "r") as f:
         categories = [line.strip() for line in f.readlines()]
-    print(f"✅ Loaded {len(categories)} categories from {CATEGORIES_FILE}")
 else:
-    print(f"⚠️ WARNING: categories.txt not found, predictions will use index numbers.")
+    categories = []
+    print("⚠️ WARNING: categories.txt not found. Predictions will not have labels.")
 
-def preprocess_image(image):
-    """Resize and normalize input image for the model"""
-    image = image.convert("L")              # grayscale
-    image = image.resize((28, 28))          # resize to 28x28
-    img_array = np.array(image) / 255.0     # normalize to [0, 1]
-    img_array = img_array.reshape(1, 28, 28, 1)
-    return img_array
-
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "ok",
-        "message": "QuickDraw AI server is running.",
-        "model_loaded": model is not None
-    })
+def preprocess_image(image_data):
+    """Preprocess input image (base64 or file) to model format"""
+    image = Image.open(io.BytesIO(image_data)).convert("L")  # grayscale
+    image = image.resize((28, 28))  # resize to model input
+    image_array = np.array(image) / 255.0
+    image_array = image_array.reshape(1, 28, 28, 1)
+    return image_array
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
-        return jsonify({"error": "Model not loaded on server"}), 500
-
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-
-    file = request.files["file"]
     try:
-        image = Image.open(file.stream)
-        processed = preprocess_image(image)
-        preds = model.predict(processed)[0]
-        top_idx = int(np.argmax(preds))
-        confidence = float(preds[top_idx])
+        if "file" in request.files:
+            image_data = request.files["file"].read()
+        else:
+            data = request.get_json()
+            if "image" not in data:
+                return jsonify({"error": "No image provided"}), 400
+            image_data = base64.b64decode(data["image"])
 
-        label = categories[top_idx] if categories and top_idx < len(categories) else str(top_idx)
+        processed = preprocess_image(image_data)
+        predictions = model.predict(processed)[0]
+        top_index = int(np.argmax(predictions))
+        confidence = float(np.max(predictions))
+        label = categories[top_index] if categories else str(top_index)
 
         return jsonify({
-            "prediction": label,
+            "label": label,
             "confidence": confidence
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ QuickDraw AI API is running!"
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
