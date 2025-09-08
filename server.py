@@ -7,7 +7,9 @@ import tensorflow as tf
 
 # Load the legacy QuickDraw model (.h5 format)
 print("Loading QuickDraw model...")
-model = tf.keras.models.load_model("quickdraw_model.h5", compile=False)
+print("Loading QuickDraw model...")
+model = tf.keras.models.load_model("quickdraw_model.keras", compile=False)
+print("Model loaded successfully!")
 print("Model loaded successfully!")
 
 # Your class labels – must match the trained dataset
