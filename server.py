@@ -1,62 +1,60 @@
 import io
 import base64
 import numpy as np
+from PIL import Image
 from flask import Flask, request, jsonify
-from PIL import Image, ImageOps
 import tensorflow as tf
 
-# ----------------------
-# Load QuickDraw model
-# ----------------------
+# Load the legacy QuickDraw model (.h5 format)
 print("Loading QuickDraw model...")
-model = tf.keras.models.load_model("quickdraw_model.h5", compile=False, safe_mode=False)
-print("✅ Model loaded")
+model = tf.keras.models.load_model("quickdraw_model.h5", compile=False)
+print("Model loaded successfully!")
 
-# ----------------------
-# Load categories
-# ----------------------
-with open("categories.txt", "r") as f:
-    class_names = [line.strip() for line in f.readlines()]
-print(f"✅ Loaded {len(class_names)} categories")
+# Your class labels – must match the trained dataset
+# Replace with the actual QuickDraw classes your model supports
+class_names = [
+    "cat", "dog", "car", "house", "tree", "bicycle", "airplane", "fish",
+    "flower", "clock", "star", "sun", "moon", "shoe", "cup"
+]
 
-# ----------------------
-# Flask app
-# ----------------------
 app = Flask(__name__)
 
-def preprocess_image(image_data):
-    """Convert base64 → PIL → 28x28 grayscale numpy array"""
-    image = Image.open(io.BytesIO(base64.b64decode(image_data)))
-    image = ImageOps.grayscale(image)
-    image = image.resize((28, 28))
-    img_array = np.array(image).astype("float32") / 255.0
-    img_array = img_array.reshape(1, 28, 28, 1)
+def preprocess_image(image_bytes):
+    """Convert incoming image bytes to model-ready tensor"""
+    img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
+    img = img.resize((28, 28))  # QuickDraw models usually use 28x28
+    img_array = np.array(img).astype("float32") / 255.0
+    img_array = np.expand_dims(img_array, axis=-1)  # add channel
+    img_array = np.expand_dims(img_array, axis=0)   # batch dim
     return img_array
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    data = request.json
+    if "image" not in data:
+        return jsonify({"error": "No image field"}), 400
+
     try:
-        data = request.get_json()
-        if "image" not in data:
-            return jsonify({"error": "No image provided"}), 400
+        # Decode base64 image
+        image_data = base64.b64decode(data["image"])
+        input_tensor = preprocess_image(image_data)
 
-        img_array = preprocess_image(data["image"])
-
-        # Run prediction
-        prediction = model.predict(img_array)
-        predicted_index = int(np.argmax(prediction))
-        predicted_label = class_names[predicted_index]
-        confidence = float(np.max(prediction))
-
-        print("Prediction:", predicted_label, "(", confidence, ")")
+        # Predict
+        preds = model.predict(input_tensor)
+        top_idx = int(np.argmax(preds[0]))
+        confidence = float(np.max(preds[0]))
 
         return jsonify({
-            "label": predicted_label,
+            "prediction": class_names[top_idx],
             "confidence": confidence
         })
+
     except Exception as e:
-        print("❌ Error:", e)
         return jsonify({"error": str(e)}), 500
+
+@app.route("/")
+def home():
+    return "QuickDraw AI server is running!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
