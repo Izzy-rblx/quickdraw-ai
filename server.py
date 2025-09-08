@@ -1,64 +1,48 @@
 import io
-import base64
 import numpy as np
-from PIL import Image
 from flask import Flask, request, jsonify
 import tensorflow as tf
+from PIL import Image
 
-# Load the legacy QuickDraw model (.h5 format)
-print("Loading QuickDraw model...")
-print("Loading QuickDraw model...")
+# Load categories
+with open("categories.txt", "r") as f:
+    categories = [line.strip() for line in f.readlines()]
+
+# Load Keras model
 model = tf.keras.models.load_model("quickdraw_model.keras", compile=False)
-print("Model loaded successfully!")
-print("Model loaded successfully!")
-
-# Your class labels – must match the trained dataset
-# Replace with the actual QuickDraw classes your model supports
-class_names = [
-    "cat", "dog", "car", "house", "tree", "bicycle", "airplane", "fish",
-    "flower", "clock", "star", "sun", "moon", "shoe", "cup"
-]
 
 app = Flask(__name__)
 
 def preprocess_image(image_bytes):
-    """Convert incoming image bytes to model-ready tensor"""
-    img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
-    img = img.resize((28, 28))  # QuickDraw models usually use 28x28
-    img_array = np.array(img).astype("float32") / 255.0
-    img_array = np.expand_dims(img_array, axis=-1)  # add channel
-    img_array = np.expand_dims(img_array, axis=0)   # batch dim
+    """Preprocess incoming image (28x28 grayscale like QuickDraw dataset)."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
+    image = image.resize((28, 28))  # match training size
+    img_array = np.array(image).astype("float32") / 255.0
+    img_array = 1.0 - img_array  # invert colors (QuickDraw is white background, black strokes)
+    img_array = np.expand_dims(img_array, axis=0)  # batch dimension
+    img_array = np.expand_dims(img_array, axis=-1) # channel dimension
     return img_array
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json
-    if "image" not in data:
-        return jsonify({"error": "No image field"}), 400
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
 
-    try:
-        # Decode base64 image
-        image_data = base64.b64decode(data["image"])
-        input_tensor = preprocess_image(image_data)
+    file = request.files["file"]
+    img_array = preprocess_image(file.read())
+    preds = model.predict(img_array)[0]
 
-        # Predict
-        preds = model.predict(input_tensor)
-        top_idx = int(np.argmax(preds[0]))
-        confidence = float(np.max(preds[0]))
+    top_idx = np.argmax(preds)
+    top_label = categories[top_idx]
+    top_conf = float(preds[top_idx])
 
-        return jsonify({
-            "prediction": class_names[top_idx],
-            "confidence": confidence
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/")
-def home():
-    return "QuickDraw AI server is running!"
+    return jsonify({
+        "prediction": top_label,
+        "confidence": round(top_conf, 4)
+    })
 
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
