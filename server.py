@@ -1,51 +1,52 @@
 import os
-import numpy as np
+import tensorflow as tf
 from flask import Flask, request, jsonify
 from PIL import Image
-import tensorflow as tf
+import numpy as np
 
-# Load model (make sure quickdraw_model.keras is in the same folder)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "quickdraw_model.keras")
+app = Flask(__name__)
+
+# Get absolute path to the model file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "quickdraw_model.keras")
+
+# Load the trained model
 model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 
 # Load categories
-with open(os.path.join(os.path.dirname(__file__), "categories.txt"), "r") as f:
-    categories = [line.strip() for line in f]
+CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.txt")
+with open(CATEGORIES_PATH, "r") as f:
+    categories = [line.strip() for line in f.readlines()]
 
-# Initialize Flask app
-app = Flask(__name__)
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ QuickDraw AI is running!"
+def preprocess_image(image_file):
+    """Preprocess uploaded image for model prediction"""
+    image = Image.open(image_file).convert("L")  # grayscale
+    image = image.resize((28, 28))               # resize to match model
+    image = np.array(image) / 255.0              # normalize to [0,1]
+    image = image.reshape(1, 28, 28, 1)          # add batch & channel dim
+    return image
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-
+    
     file = request.files["file"]
+    image = preprocess_image(file)
+    predictions = model.predict(image)
+    predicted_index = np.argmax(predictions)
+    predicted_label = categories[predicted_index]
+    confidence = float(np.max(predictions))
 
-    try:
-        img = Image.open(file).convert("L")  # grayscale
-        img = img.resize((28, 28))           # match training input
-        img_array = np.array(img) / 255.0
-        img_array = img_array.reshape(1, 28, 28, 1)
+    return jsonify({
+        "prediction": predicted_label,
+        "confidence": confidence
+    })
 
-        preds = model.predict(img_array)
-        pred_index = np.argmax(preds[0])
-        pred_label = categories[pred_index]
+@app.route("/")
+def home():
+    return "QuickDraw AI Model is running 🚀"
 
-        return jsonify({
-            "prediction": pred_label,
-            "confidence": float(np.max(preds[0]))
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ✅ Only needed when testing locally (not used on Render)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port)
