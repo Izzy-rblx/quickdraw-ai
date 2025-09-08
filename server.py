@@ -1,52 +1,51 @@
 import os
-import tensorflow as tf
+import sys
 from flask import Flask, request, jsonify
-from PIL import Image
 import numpy as np
+from PIL import Image
+import tensorflow as tf
 
 app = Flask(__name__)
 
-# Get absolute path to the model file
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "quickdraw_model.keras")
+MODEL_PATH = "quickdraw_model.keras"
 
-# Load the trained model
-model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+# Check if model file exists before loading
+if not os.path.exists(MODEL_PATH):
+    print(f"❌ ERROR: Model file '{MODEL_PATH}' not found. "
+          f"Make sure it was downloaded in render-build.sh.", file=sys.stderr)
+    sys.exit(1)  # Exit immediately, prevents crashing later
 
-# Load categories
-CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.txt")
-with open(CATEGORIES_PATH, "r") as f:
-    categories = [line.strip() for line in f.readlines()]
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+    print(f"✅ Successfully loaded model from {MODEL_PATH}")
+except Exception as e:
+    print(f"❌ ERROR: Failed to load model from '{MODEL_PATH}': {e}", file=sys.stderr)
+    sys.exit(1)
 
-def preprocess_image(image_file):
-    """Preprocess uploaded image for model prediction"""
-    image = Image.open(image_file).convert("L")  # grayscale
-    image = image.resize((28, 28))               # resize to match model
-    image = np.array(image) / 255.0              # normalize to [0,1]
-    image = image.reshape(1, 28, 28, 1)          # add batch & channel dim
-    return image
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    
-    file = request.files["file"]
-    image = preprocess_image(file)
-    predictions = model.predict(image)
-    predicted_index = np.argmax(predictions)
-    predicted_label = categories[predicted_index]
-    confidence = float(np.max(predictions))
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
-    return jsonify({
-        "prediction": predicted_label,
-        "confidence": confidence
-    })
+        file = request.files["file"]
+        image = Image.open(file).convert("L").resize((28, 28))  # grayscale + resize
+        img_array = np.array(image).reshape(1, 28, 28, 1) / 255.0
 
-@app.route("/")
+        predictions = model.predict(img_array)
+        predicted_class = int(np.argmax(predictions[0]))
+
+        return jsonify({"class": predicted_class, "confidence": float(np.max(predictions[0]))})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/", methods=["GET"])
 def home():
-    return "QuickDraw AI Model is running 🚀"
+    return "✅ QuickDraw AI is running!"
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
