@@ -1,40 +1,72 @@
-from flask import Flask, request, jsonify
+import io
+import base64
 import numpy as np
-import tensorflow as tf
+from flask import Flask, request, jsonify
+from PIL import Image, ImageOps
+from keras.src.legacy.saving import legacy_h5_format
 
+# ----------------------
+# Load QuickDraw model
+# ----------------------
+print("Loading QuickDraw model...")
+model = legacy_h5_format.load_model_from_hdf5("quickdraw_model.h5")
+print("✅ Model loaded")
+
+# ----------------------
+# Load categories
+# ----------------------
+with open("categories.txt", "r") as f:
+    class_names = [line.strip() for line in f.readlines()]
+print(f"✅ Loaded {len(class_names)} categories")
+
+# ----------------------
+# Flask app
+# ----------------------
 app = Flask(__name__)
 
-# Load model once at startup
-print("Loading QuickDraw model...")
-model = tf.keras.models.load_model("quickdraw_model.h5")
-
-# Load categories
-with open("categories.txt") as f:
-    categories = [line.strip() for line in f]
+def preprocess_image(image_data):
+    """Convert base64 → PIL → 28x28 grayscale numpy array"""
+    image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+    
+    # Convert to grayscale
+    image = ImageOps.grayscale(image)
+    
+    # Resize to 28x28
+    image = image.resize((28, 28))
+    
+    # Convert to numpy + normalize
+    img_array = np.array(image).astype("float32") / 255.0
+    
+    # Reshape for model
+    img_array = img_array.reshape(1, 28, 28, 1)
+    
+    return img_array
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json
-    strokes = data.get("strokes", [])
+    try:
+        data = request.get_json()
+        if "image" not in data:
+            return jsonify({"error": "No image provided"}), 400
+        
+        img_array = preprocess_image(data["image"])
+        
+        # Run prediction
+        prediction = model.predict(img_array)
+        predicted_index = int(np.argmax(prediction))
+        predicted_label = class_names[predicted_index]
+        confidence = float(np.max(prediction))
+        
+        print("Prediction:", predicted_label, "(", confidence, ")")
+        
+        return jsonify({
+            "label": predicted_label,
+            "confidence": confidence
+        })
+    except Exception as e:
+        print("❌ Error:", e)
+        return jsonify({"error": str(e)}), 500
 
-    # Create 28x28 empty image
-    img = np.zeros((28, 28), dtype=np.float32)
-
-    # Scale strokes down to 28x28
-    for stroke in strokes:
-        for point in stroke:
-            x = int(point["x"] / 10)  # scale (Roblox canvas ~280x280)
-            y = int(point["y"] / 10)
-            if 0 <= x < 28 and 0 <= y < 28:
-                img[y, x] = 1.0
-
-    # Reshape for model
-    img = img.reshape(1, 28, 28, 1)
-
-    # Predict
-    preds = model.predict(img, verbose=0)
-    idx = int(np.argmax(preds))
-    guess = categories[idx]
-
-    return jsonify({"guess": guess})
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
 
