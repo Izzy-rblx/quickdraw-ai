@@ -1,5 +1,4 @@
 flask
 flask-cors
 tensorflow==2.20.0
-keras==3.3.3
 gunicorn
