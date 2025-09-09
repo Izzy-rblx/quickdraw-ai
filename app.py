@@ -1,61 +1,59 @@
-from flask import Flask, request, jsonify
-import tensorflow as tf
+import os
 import numpy as np
+import tensorflow as tf
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-# ✅ Create Flask app
+# 🔹 Flask setup
 app = Flask(__name__)
+CORS(app)
 
-# ✅ Load categories
+# 🔹 Load categories
 with open("categories.txt", "r") as f:
-    categories = [line.strip() for line in f.readlines() if line.strip()]
-
+    categories = [line.strip() for line in f.readlines()]
 print(f"✅ Loaded {len(categories)} categories")
 
-# ✅ Load the SavedModel (use the folder you uploaded)
+# 🔹 Load model
 print("✅ Loading model...")
-model = tf.saved_model.load("quickdraw_saved_model")
-infer = model.signatures["serving_default"]
+model = tf.keras.layers.TFSMLayer("quickdraw_saved_model", call_endpoint="serving_default")
 print("✅ Model loaded successfully")
 
-# 🔹 Convert strokes (28x28 int array) into float32 normalized tensor
-def preprocess_bitmap(bitmap):
-    arr = np.array(bitmap, dtype=np.float32) / 255.0  # normalize 0–1
-    arr = arr.reshape(1, 28, 28, 1)  # match model input shape
-    return tf.convert_to_tensor(arr, dtype=tf.float32)
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return "✅ QuickDraw AI API is running!", 200
+    return "QuickDraw AI is running!", 200
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json()
-        if not data or "image" not in data:
-            return jsonify({"error": "No image data provided"}), 400
+        # 🔹 Log raw body for debugging
+        raw_data = request.data.decode("utf-8")
+        print("📥 Raw Request Body (first 500 chars):", raw_data[:500])
 
-        # 🔹 Preprocess input
-        bitmap = data["image"]
-        input_tensor = preprocess_bitmap(bitmap)
+        # Parse JSON
+        data = request.get_json(force=True)
+        print("📥 Parsed JSON keys:", list(data.keys()))
 
-        # 🔹 Run inference
-        outputs = infer(tf.constant(input_tensor))
-        probs = list(outputs.values())[0].numpy()[0]
+        if "image" not in data:
+            return jsonify({"error": "Missing 'image' field"}), 400
 
-        # 🔹 Pick top prediction
-        top_idx = int(np.argmax(probs))
-        guess = categories[top_idx]
-        confidence = float(probs[top_idx])
+        # Convert to numpy
+        image = np.array(data["image"], dtype=np.float32).reshape(1, 28, 28, 1) / 255.0
+        print("✅ Image shape:", image.shape, "dtype:", image.dtype)
 
-        return jsonify({
-            "guess": guess,
-            "confidence": round(confidence, 4)
-        })
+        # Predict
+        preds = model(image)[0].numpy()
+        guess_idx = int(np.argmax(preds))
+        guess = categories[guess_idx]
+
+        print("🤖 Guess:", guess)
+
+        return jsonify({"guess": guess}), 200
 
     except Exception as e:
         print("❌ Error in /predict:", str(e))
         return jsonify({"error": str(e)}), 500
 
-# ✅ Render/Gunicorn entrypoint
+# 🔹 Entry point for Render/Gunicorn
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
