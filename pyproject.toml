@@ -1,4 +1,0 @@
-[tool.poetry]
-name = "ignore"
-version = "0.1.0"
-description = "Force Render to use requirements.txt"
