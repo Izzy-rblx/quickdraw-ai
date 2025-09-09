@@ -1,79 +1,52 @@
 import os
-import io
-import logging
 import numpy as np
 from flask import Flask, request, jsonify
-from PIL import Image
-import tensorflow as tf
+from tensorflow.keras.models import load_model
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("QuickDrawServer")
-
-# Initialize Flask
-app = Flask(__name__)
+# Load the TensorFlow SavedModel
+MODEL_PATH = "quickdraw_saved_model"
+model = load_model(MODEL_PATH)
 
 # Load categories
 with open("categories.txt", "r") as f:
-    CATEGORIES = [line.strip() for line in f.readlines()]
+    categories = [line.strip() for line in f.readlines()]
 
-# Try to load model (Keras v3 / H5 / SavedModel)
-MODEL_PATH = None
-model = None
+app = Flask(__name__)
 
-logger.info("📂 Current directory: %s", os.getcwd())
-logger.info("📄 Files here: %s", os.listdir(os.getcwd()))
-
-if os.path.exists("quickdraw_model.keras"):
-    MODEL_PATH = "quickdraw_model.keras"
-    logger.info(f"📦 Loading Keras v3 model: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH)
-
-elif os.path.exists("quickdraw_model.h5"):
-    MODEL_PATH = "quickdraw_model.h5"
-    logger.info(f"📦 Loading legacy H5 model: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH)
-
-elif os.path.exists("quickdraw_saved_model"):
-    MODEL_PATH = "quickdraw_saved_model"
-    logger.info(f"📦 Loading TensorFlow SavedModel: {MODEL_PATH}")
-    model = tf.keras.models.load_model(MODEL_PATH)
-
-else:
-    raise FileNotFoundError("❌ No model file found (expected .keras, .h5, or SavedModel folder).")
-
-logger.info("✅ Model loaded successfully!")
-
-
-def preprocess_image(image_bytes):
-    """Convert raw image bytes into model input tensor."""
-    image = Image.open(io.BytesIO(image_bytes)).convert("L").resize((28, 28))
-    img_array = np.array(image) / 255.0
-    img_array = img_array.reshape(1, 28, 28, 1).astype("float32")
-    return img_array
-
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "ok", "message": "QuickDraw AI API is running 🚀"})
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """Handle prediction requests."""
-    if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+    try:
+        data = request.get_json()
+        if not data or "image" not in data:
+            return jsonify({"error": "No image data"}), 400
 
-    file = request.files["file"]
-    img_array = preprocess_image(file.read())
-    preds = model.predict(img_array)[0]
+        # Convert JSON → numpy array
+        img_array = np.array(data["image"], dtype=np.float32)
 
-    top_idx = np.argmax(preds)
-    result = {
-        "category": CATEGORIES[top_idx],
-        "confidence": float(preds[top_idx]),
-    }
-    return jsonify(result)
+        # Ensure it's 28x28
+        if img_array.shape != (28, 28):
+            return jsonify({"error": f"Invalid image shape {img_array.shape}, expected (28,28)"}), 400
 
+        # Normalize & reshape
+        img_array = img_array / 255.0
+        img_array = np.expand_dims(img_array, axis=(0, -1))  # shape (1,28,28,1)
 
-@app.route("/", methods=["GET"])
-def health_check():
-    return jsonify({"status": "ok", "categories": len(CATEGORIES)})
+        # Predict
+        preds = model.predict(img_array)
+        class_index = int(np.argmax(preds, axis=1)[0])
+        confidence = float(np.max(preds))
+
+        return jsonify({
+            "guess": categories[class_index],
+            "confidence": confidence
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
