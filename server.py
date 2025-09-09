@@ -81,15 +81,24 @@ def predict():
         img = np.expand_dims(img, axis=(0, -1))  # shape (1, 28, 28, 1)
 
         # Predict
-        preds = model.predict(img)
-        pred_idx = int(np.argmax(preds))
-        confidence = float(np.max(preds))
+        preds = model.predict(img)[0]  # shape (num_classes,)
+        top_indices = np.argsort(preds)[::-1][:5]  # top 5 predictions
 
-        guess = categories[pred_idx] if categories and pred_idx < len(categories) else str(pred_idx)
+        top_predictions = [
+            {
+                "label": categories[i] if categories and i < len(categories) else str(i),
+                "confidence": float(preds[i])
+            }
+            for i in top_indices
+        ]
+
+        # Log top 5 for debugging
+        logger.info("🔮 Top predictions: %s", top_predictions)
 
         return jsonify({
-            "guess": guess,
-            "confidence": confidence
+            "top_predictions": top_predictions,
+            "guess": top_predictions[0]["label"],
+            "confidence": top_predictions[0]["confidence"]
         })
 
     except Exception as e:
