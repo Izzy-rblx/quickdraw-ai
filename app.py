@@ -1,80 +1,87 @@
-from flask import Flask, request, jsonify
-import numpy as np
-import tensorflow as tf
 import os
+import numpy as np
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import tensorflow as tf
+from tensorflow import keras
 
-# Paths
-MODEL_PATH = "quickdraw_saved_model"  # directory-based SavedModel
+app = Flask(__name__)
+CORS(app)
+
+# ---------------------------
+# Load categories
+# ---------------------------
 CATEGORIES_PATH = "categories.txt"
-
-# Globals
-model = None
-CATEGORIES = []
-
-# Try loading model
-if os.path.exists(MODEL_PATH):
-    try:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        print("✅ Model loaded successfully from SavedModel format")
-    except Exception as e:
-        print(f"⚠️ Failed to load model: {e}")
-else:
-    print(f"⚠️ Model path not found: {MODEL_PATH}")
-
-# Try loading categories
 if os.path.exists(CATEGORIES_PATH):
     with open(CATEGORIES_PATH, "r") as f:
-        CATEGORIES = [line.strip() for line in f if line.strip()]
-    print(f"✅ Loaded {len(CATEGORIES)} categories")
+        categories = [line.strip() for line in f.readlines()]
+    print(f"✅ Loaded {len(categories)} categories")
 else:
-    print("⚠️ categories.txt not found")
+    categories = []
+    print("⚠️ No categories.txt found")
 
-# Flask app
-app = Flask(__name__)
+# ---------------------------
+# Load model (SavedModel via TFSMLayer)
+# ---------------------------
+MODEL_PATH = "quickdraw_saved_model"
+model = None
+try:
+    if os.path.exists(MODEL_PATH):
+        model = keras.layers.TFSMLayer(MODEL_PATH, call_endpoint="serving_default")
+        print("✅ Model loaded successfully (TFSMLayer)")
+    else:
+        print("⚠️ Model not found, predictions disabled")
+except Exception as e:
+    print("⚠️ Failed to load model:", e)
 
+
+# ---------------------------
+# Preprocess strokes → 28x28 grayscale
+# ---------------------------
 def preprocess_strokes(strokes, size=28):
-    """
-    Convert strokes (list of points) into a 28x28 grayscale image.
-    """
-    bitmap = np.zeros((size, size), dtype=np.uint8)
+    canvas = np.zeros((size, size), dtype=np.uint8)
     for stroke in strokes:
         for point in stroke:
-            x = min(size - 1, max(0, int(point["x"] / 10)))
-            y = min(size - 1, max(0, int(point["y"] / 10)))
-            bitmap[y, x] = 255
-    bitmap = bitmap.astype("float32") / 255.0
-    bitmap = np.expand_dims(bitmap, axis=(0, -1))  # (1, 28, 28, 1)
-    return bitmap
+            x = int(np.clip(point.get("x", 0) / 10, 0, size - 1))
+            y = int(np.clip(point.get("y", 0) / 10, 0, size - 1))
+            canvas[y, x] = 255
+    img = canvas.astype("float32") / 255.0
+    return img.reshape(1, size, size, 1)
 
+
+# ---------------------------
+# API Routes
+# ---------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "message": "QuickDraw AI running!"})
+    return "QuickDraw AI API is running (stroke-only mode)."
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
+    if not model:
         return jsonify({"error": "Model not loaded"}), 503
+
     try:
         data = request.get_json()
-        strokes = data.get("image")
+        if not data or "image" not in data:
+            return jsonify({"error": "No stroke data provided"}), 400
 
-        if not strokes:
-            return jsonify({"error": "No stroke data received"}), 400
+        strokes = data["image"]
+        processed = preprocess_strokes(strokes)
 
-        img = preprocess_strokes(strokes)
-        preds = model.predict(img)
-        idx = int(np.argmax(preds[0]))
-        guess = CATEGORIES[idx] if idx < len(CATEGORIES) else "?"
+        # Run inference
+        preds = model(processed, training=False).numpy()[0]
+        idx = int(np.argmax(preds))
+        guess = categories[idx] if idx < len(categories) else "Unknown"
 
         return jsonify({
             "guess": guess,
-            "confidence": float(np.max(preds[0]))
+            "confidence": float(preds[idx])
         })
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
