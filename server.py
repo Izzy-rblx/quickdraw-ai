@@ -1,116 +1,105 @@
 import os
-import io
-import hashlib
 import logging
+import hashlib
+import tensorflow as tf
 import numpy as np
 from flask import Flask, request, jsonify
 from PIL import Image
-import tensorflow as tf
 
-# -----------------------------------------------------------------------------
-# Flask setup
-# -----------------------------------------------------------------------------
-app = Flask(__name__)
-
+# ---------------------------------------------------------------------
+# Setup logging
+# ---------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("QuickDrawServer")
 
-# -----------------------------------------------------------------------------
-# Model setup
-# -----------------------------------------------------------------------------
-MODEL_PATH = "quickdraw_model.keras"
+# ---------------------------------------------------------------------
+# Model + categories setup
+# ---------------------------------------------------------------------
+MODEL_PATH = os.getenv("QUICKDRAW_MODEL_PATH", "quickdraw_model.h5")  # ✅ now uses .h5
+CATEGORIES_FILE = os.getenv("CATEGORIES_FILE", "categories.txt")
 
+# Log working directory and files
+logger.info("📂 Current working directory: %s", os.getcwd())
+logger.info("📄 Files in CWD: %s", os.listdir(os.getcwd()))
+
+# Check if model file exists
 if not os.path.exists(MODEL_PATH):
-    logger.error(f"❌ Model file not found: {MODEL_PATH}")
-    raise FileNotFoundError(f"{MODEL_PATH} missing, upload it first")
+    logger.error("❌ Model file not found at %s", MODEL_PATH)
+    raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
 
-# Log file info
-size = os.path.getsize(MODEL_PATH)
-logger.info(f"📦 Model file size: {size/1024:.2f} KB")
+# Log size and checksum
+file_size = os.path.getsize(MODEL_PATH) / 1024
+logger.info("📦 Model file size: %.2f KB", file_size)
 
+sha256_hash = hashlib.sha256()
 with open(MODEL_PATH, "rb") as f:
-    checksum = hashlib.sha256(f.read()).hexdigest()
-logger.info(f"🔑 Model SHA256 checksum: {checksum}")
+    for byte_block in iter(lambda: f.read(4096), b""):
+        sha256_hash.update(byte_block)
+checksum = sha256_hash.hexdigest()
+logger.info("🔑 Model SHA256 checksum: %s", checksum)
 
 # Load model
 try:
     model = tf.keras.models.load_model(MODEL_PATH)
-    logger.info("✅ Model loaded successfully")
+    logger.info("✅ Model loaded successfully.")
 except Exception as e:
-    logger.exception("❌ Failed to load model")
-    raise
+    logger.error("❌ Failed to load model", exc_info=True)
+    raise e
 
-# -----------------------------------------------------------------------------
-# Helper functions
-# -----------------------------------------------------------------------------
-def preprocess_bitmap(bitmap):
-    """Convert Roblox bitmap JSON → model input (28x28 grayscale)."""
-    logger.info("🖼️ Preprocessing bitmap...")
+# Load categories
+categories = []
+if os.path.exists(CATEGORIES_FILE):
+    with open(CATEGORIES_FILE, "r") as f:
+        categories = [line.strip() for line in f.readlines()]
+    logger.info("📚 Loaded %d categories.", len(categories))
+else:
+    logger.warning("⚠️ Categories file not found (%s).", CATEGORIES_FILE)
 
-    try:
-        arr = np.array(bitmap, dtype=np.float32)
-        if arr.shape != (28, 28):
-            logger.warning(f"⚠️ Bitmap shape mismatch: got {arr.shape}, expected (28, 28)")
-            return None
-        arr = arr / 255.0  # normalize
-        arr = arr.reshape(1, 28, 28, 1)
-        return arr
-    except Exception as e:
-        logger.exception("❌ Failed during preprocessing")
-        return None
+# ---------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------
+app = Flask(__name__)
 
-def predict_image(arr):
-    """Run model prediction and return best class."""
-    try:
-        preds = model.predict(arr)
-        idx = np.argmax(preds[0])
-        confidence = float(np.max(preds[0]))
-        return idx, confidence
-    except Exception as e:
-        logger.exception("❌ Prediction failed")
-        return None, None
-
-# -----------------------------------------------------------------------------
-# Routes
-# -----------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
-def root():
+def index():
     return jsonify({"message": "QuickDraw AI API", "ok": True})
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json()
-        logger.info(f"📩 Incoming JSON: {str(data)[:300]}")  # truncate long logs
-
         if not data or "image" not in data:
-            logger.warning("⚠️ Missing 'image' in payload")
-            return jsonify({"error": "Missing image"}), 400
+            return jsonify({"error": "Missing 'image' in request"}), 400
 
-        bitmap = data["image"]
-        arr = preprocess_bitmap(bitmap)
-        if arr is None:
-            return jsonify({"error": "Invalid bitmap"}), 400
+        # Expecting 28x28 grayscale bitmap (list of lists)
+        bitmap = np.array(data["image"], dtype=np.uint8)
+        if bitmap.shape != (28, 28):
+            return jsonify({"error": f"Invalid image shape {bitmap.shape}, expected (28,28)"}), 400
 
-        idx, confidence = predict_image(arr)
-        if idx is None:
-            return jsonify({"error": "Prediction failed"}), 500
+        # Normalize + reshape
+        img = bitmap.astype("float32") / 255.0
+        img = np.expand_dims(img, axis=(0, -1))  # shape (1, 28, 28, 1)
 
-        result = {
-            "guess": str(idx),
-            "confidence": round(confidence, 4)
-        }
-        logger.info(f"✅ Prediction: {result}")
-        return jsonify(result)
+        # Predict
+        preds = model.predict(img)
+        pred_idx = int(np.argmax(preds))
+        confidence = float(np.max(preds))
+
+        guess = categories[pred_idx] if categories and pred_idx < len(categories) else str(pred_idx)
+
+        return jsonify({
+            "guess": guess,
+            "confidence": confidence
+        })
 
     except Exception as e:
-        logger.exception("❌ Unexpected error in /predict")
-        return jsonify({"error": "Server error"}), 500
+        logger.error("Prediction error", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Entrypoint
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Starting server on port {port}")
+    port = int(os.getenv("PORT", 10000))
+    logger.info("🚀 Starting server on port %s", port)
     app.run(host="0.0.0.0", port=port)
