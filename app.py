@@ -1,3 +1,24 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import numpy as np
+import tensorflow as tf
+import json
+
+# 🔹 Initialize Flask
+app = Flask(__name__)
+CORS(app)
+
+# 🔹 Load model + categories
+print("✅ Loading model...")
+model = tf.saved_model.load("model")
+with open("categories.json", "r") as f:
+    categories = json.load(f)
+print(f"✅ Loaded {len(categories)} categories")
+
+@app.route("/")
+def home():
+    return "QuickDraw AI API is running ✅"
+
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -16,7 +37,7 @@ def predict():
                 x = int(point.get("x", 0) / 10)
                 y = int(point.get("y", 0) / 10)
                 if 0 <= x < 28 and 0 <= y < 28:
-                    img[y, x] = 255  # mark pixel as drawn
+                    img[y, x] = 255
 
         # Normalize to [0,1]
         img = img.astype("float32") / 255.0
@@ -35,3 +56,7 @@ def predict():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# 🔹 Run locally (Render will use Gunicorn)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
