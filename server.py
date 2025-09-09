@@ -4,108 +4,92 @@ import base64
 import hashlib
 import numpy as np
 from flask import Flask, request, jsonify
-from PIL import Image
-import tensorflow as tf
+from tensorflow import keras
+from PIL import Image, ImageDraw
 
-# -------------------- CONFIG --------------------
-MODEL_PATH = os.environ.get("QUICKDRAW_MODEL_PATH", "quickdraw_model.keras")
-CATEGORIES_FILE = os.environ.get("CATEGORIES_FILE", "categories.txt")
-
+# Flask app
 app = Flask(__name__)
 
-# -------------------- LOGGING UTILS --------------------
+# Load categories
+CATEGORIES_FILE = "categories.txt"
+with open(CATEGORIES_FILE, "r") as f:
+    categories = [line.strip() for line in f.readlines()]
+print(f"[SERVER LOG] 📚 Loaded {len(categories)} categories.")
+
+# Helper: log
 def log(msg):
     print(f"[SERVER LOG] {msg}", flush=True)
 
-def file_sha256(path):
-    sha256_hash = hashlib.sha256()
-    with open(path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+# Helper: checksum
+def sha256sum(filename):
+    h = hashlib.sha256()
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-# -------------------- LOAD CATEGORIES --------------------
-if os.path.exists(CATEGORIES_FILE):
-    with open(CATEGORIES_FILE, "r") as f:
-        categories = [line.strip() for line in f.readlines()]
-    log(f"📚 Loaded {len(categories)} categories.")
-else:
-    categories = []
-    log("⚠️ No categories.txt found!")
-
-# -------------------- LOAD MODEL --------------------
-log(f"🔍 Looking for model at: {os.path.abspath(MODEL_PATH)}")
-log(f"📂 Current working directory: {os.getcwd()}")
-log(f"📄 Files in CWD: {os.listdir('.')}")
-
+# Load model
+MODEL_PATH = os.getenv("QUICKDRAW_MODEL_PATH", "quickdraw_model.keras")
+log(f"🔍 Looking for model at: {MODEL_PATH}")
 if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"❌ Model file not found at {MODEL_PATH}")
+    raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
-size = os.path.getsize(MODEL_PATH) / (1024 * 1024)
-log(f"📦 Found model file {MODEL_PATH}, size: {size:.2f} MB")
-log(f"✅ Model checksum (sha256): {file_sha256(MODEL_PATH)}")
+log(f"📦 Found model file at {MODEL_PATH}, size: {os.path.getsize(MODEL_PATH)/1024:.2f} KB")
+log(f"✅ Model checksum (sha256): {sha256sum(MODEL_PATH)}")
 
-# Handle wrong extension
-model_file_to_load = MODEL_PATH
+# If mislabeled as .keras but actually h5
 if MODEL_PATH.endswith(".keras"):
     with open(MODEL_PATH, "rb") as f:
-        header = f.read(4)
-    if header != b"\x93HDF":
-        log("🔎 File has .keras extension but is NOT zip; renaming to .h5...")
-        h5_path = MODEL_PATH.replace(".keras", ".h5")
-        os.rename(MODEL_PATH, h5_path)
-        model_file_to_load = h5_path
+        header = f.read(8)
+    if not (header.startswith(b"\x89HDF") or header.startswith(b"\x93NUMPY")):
+        log("🔎 File has .keras extension but is NOT a zip; renaming to .h5")
+        new_path = MODEL_PATH.replace(".keras", ".h5")
+        os.rename(MODEL_PATH, new_path)
+        MODEL_PATH = new_path
 
-# Load
-log("📚 Loading model...")
-model = tf.keras.models.load_model(model_file_to_load)
+# Load Keras model
+model = keras.models.load_model(MODEL_PATH)
 log("✅ Model loaded successfully.")
 
-# Show input shape
-try:
-    log(f"🧪 Model inputs: {model.inputs}")
-except Exception:
-    log("⚠️ Could not inspect model inputs.")
-
-# -------------------- ROUTES --------------------
 @app.route("/", methods=["GET"])
-def home():
+def index():
     return jsonify({"message": "QuickDraw AI API", "ok": True})
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "No JSON received"}), 400
 
-        # Case 1: strokes (from Roblox)
-        if "strokes" in data:
-            log("🖊 Received strokes input")
-            strokes = data["strokes"]
-            canvas = np.zeros((28, 28), dtype=np.uint8)
+        img = None
 
-            # normalize strokes into 28x28
-            for stroke in strokes:
-                for point in stroke:
-                    x = int(point["x"] / 10)  # ⚠ adjust divisor depending on UI size
-                    y = int(point["y"] / 10)
-                    if 0 <= x < 28 and 0 <= y < 28:
-                        canvas[y, x] = 255
+        # ✅ Prefer strokes input (Roblox case)
+        if "strokes" in data and isinstance(data["strokes"], list):
+            log("🖊 Using strokes input")
+            canvas = Image.new("L", (28, 28), 0)
+            draw = ImageDraw.Draw(canvas)
 
-            img = canvas.astype("float32") / 255.0
+            for stroke in data["strokes"]:
+                points = [(int(p["x"] / 10), int(p["y"] / 10)) for p in stroke if "x" in p and "y" in p]
+                if len(points) > 1:
+                    draw.line(points, fill=255, width=1)
+                elif points:
+                    draw.point(points[0], fill=255)
+
+            img = np.array(canvas).astype("float32") / 255.0
             img = np.expand_dims(img, axis=(0, -1))
 
-        # Case 2: base64 image
-        elif "image" in data:
-            log("🖼 Received image input")
+        # ✅ Or base64 image input
+        elif "image" in data and isinstance(data["image"], str):
+            log("🖼 Using base64 image input")
             img_bytes = base64.b64decode(data["image"])
             img = Image.open(io.BytesIO(img_bytes)).convert("L").resize((28, 28))
             img = np.array(img).astype("float32") / 255.0
             img = np.expand_dims(img, axis=(0, -1))
 
         else:
-            return jsonify({"error": "No strokes or image provided"}), 400
+            return jsonify({"error": "Invalid input format"}), 400
 
         # Run prediction
         preds = model.predict(img)
@@ -119,11 +103,8 @@ def predict():
         log(f"❌ Error in /predict: {e}")
         return jsonify({"error": str(e)}), 500
 
-# -------------------- MAIN --------------------
+# Run app
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    log("🚀 Starting server...")
-    log(f"🧭 ENV PORT={port}")
-    log(f"🧭 ENV QUICKDRAW_MODEL_PATH={MODEL_PATH}")
-    log(f"🧭 CATEGORIES_FILE={CATEGORIES_FILE}")
+    port = int(os.getenv("PORT", 10000))
+    log(f"🚀 Starting server on port {port}")
     app.run(host="0.0.0.0", port=port)
