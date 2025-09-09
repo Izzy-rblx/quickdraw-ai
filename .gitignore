@@ -1,0 +1,32 @@
+﻿# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE/editor settings
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+
+# TensorFlow / model checkpoints (we only need SavedModel folder)
+*.h5
+*.ckpt

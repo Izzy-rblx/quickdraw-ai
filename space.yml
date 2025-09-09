@@ -1,2 +1,11 @@
+<<<<<<< HEAD
 ﻿sdk: docker
+=======
+<<<<<<< HEAD
+# Hugging Face Space configuration
+sdk: docker
+=======
+﻿sdk: docker
+>>>>>>> 489a20f (Prepare for Hugging Face deployment)
+>>>>>>> 75e34ac (Add lightweight .gitignore)
 app_port: 7860
