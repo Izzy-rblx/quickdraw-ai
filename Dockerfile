@@ -1,25 +1,19 @@
-# Use an official lightweight Python image
+# Use Python base image
 FROM python:3.13-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for TensorFlow, h5py, etc.)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libhdf5-dev \
-    libgl1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirement files and install Python deps
+# Install dependencies first (better caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all project files (including model + categories)
+# Copy all app files, including model and categories
 COPY . .
 
-# Expose the Hugging Face Space port
-EXPOSE 7860
+# Expose port for Render
+ENV PORT=10000
+EXPOSE 10000
 
-# Run with gunicorn (production server)
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:7860"]
+# Run Gunicorn
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000"]
