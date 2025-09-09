@@ -1,65 +1,65 @@
-from flask import Flask, request, jsonify
-import numpy as np
-import tensorflow as tf
 import os
-import traceback
-
-# === Load model ===
-MODEL_PATH = "model.h5"  # or quickdraw_saved_model if you exported differently
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
-model = tf.keras.models.load_model(MODEL_PATH)
-
-# === Load categories from file ===
-CATEGORIES_FILE = "categories.txt"
-if not os.path.exists(CATEGORIES_FILE):
-    raise FileNotFoundError(f"Categories file not found at {CATEGORIES_FILE}")
-with open(CATEGORIES_FILE, "r", encoding="utf-8") as f:
-    CATEGORIES = [line.strip() for line in f if line.strip()]
+import numpy as np
+from flask import Flask, request, jsonify
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
+from PIL import Image
 
 app = Flask(__name__)
 
-# === Preprocess strokes into a 28x28 image ===
-def preprocess_strokes(strokes, size=28):
-    bitmap = np.zeros((size, size), dtype=np.uint8)
-    for stroke in strokes:
-        for point in stroke:
-            x = min(size - 1, max(0, int(point["x"] / 10)))
-            y = min(size - 1, max(0, int(point["y"] / 10)))
-            bitmap[y, x] = 255
-    bitmap = bitmap.astype("float32") / 255.0
-    # Add channel dimension if needed (28,28,1)
-    bitmap = np.expand_dims(bitmap, axis=(0, -1))
-    return bitmap
+MODEL_PATH = "model.h5"
+CATEGORIES_PATH = "categories.txt"
 
-@app.route("/")
+# Try loading model
+model = None
+categories = []
+
+if os.path.exists(MODEL_PATH):
+    try:
+        model = load_model(MODEL_PATH)
+        print(f"✅ Model loaded successfully from {MODEL_PATH}")
+    except Exception as e:
+        print(f"⚠️ Failed to load model: {e}")
+else:
+    print(f"⚠️ Model file not found at {MODEL_PATH}. The API will run, but predictions won't work.")
+
+# Load categories if available
+if os.path.exists(CATEGORIES_PATH):
+    with open(CATEGORIES_PATH, "r") as f:
+        categories = [line.strip() for line in f.readlines()]
+    print(f"✅ Loaded {len(categories)} categories")
+else:
+    print(f"⚠️ Categories file not found at {CATEGORIES_PATH}")
+
+@app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "message": "QuickDraw AI running!"})
+    return "QuickDraw AI is running! 🚀"
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    if model is None or not categories:
+        return jsonify({"error": "Model or categories not available on server"}), 503
+
     try:
-        data = request.get_json()
-        strokes = data.get("image")
+        # Read image from request
+        file = request.files["file"]
+        image = Image.open(file).convert("L").resize((28, 28))
+        image = img_to_array(image) / 255.0
+        image = np.expand_dims(image, axis=0)
 
-        if not strokes:
-            return jsonify({"error": "No stroke data received"}), 400
-
-        img = preprocess_strokes(strokes)
-
-        preds = model(img).numpy()
-        idx = int(np.argmax(preds[0]))
-        guess = CATEGORIES[idx] if idx < len(CATEGORIES) else "?"
+        # Make prediction
+        preds = model.predict(image)[0]
+        top_index = np.argmax(preds)
+        top_category = categories[top_index]
+        confidence = float(preds[top_index])
 
         return jsonify({
-            "guess": guess,
-            "confidence": float(np.max(preds[0]))
+            "prediction": top_category,
+            "confidence": confidence
         })
-
     except Exception as e:
-        traceback.print_exc()  # log full error in Render logs
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    # For local testing
-    app.run(host="0.0.0.0", port=7860)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
