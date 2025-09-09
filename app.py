@@ -1,59 +1,47 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # disable GPU to save memory
+
+from flask import Flask, request, jsonify
 import numpy as np
 import tensorflow as tf
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import json
 
-# 🔹 Flask setup
-app = Flask(__name__)
-CORS(app)
+# Load categories
+with open("categories.json", "r") as f:
+    categories = json.load(f)
 
-# 🔹 Load categories
-with open("categories.txt", "r") as f:
-    categories = [line.strip() for line in f.readlines()]
 print(f"✅ Loaded {len(categories)} categories")
 
-# 🔹 Load model
 print("✅ Loading model...")
-model = tf.keras.layers.TFSMLayer("quickdraw_saved_model", call_endpoint="serving_default")
+model = tf.saved_model.load("model")
 print("✅ Model loaded successfully")
 
+app = Flask(__name__)
+
 @app.route("/")
-def home():
-    return "QuickDraw AI is running!", 200
+def index():
+    return "QuickDraw AI is running!"
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # 🔹 Log raw body for debugging
-        raw_data = request.data.decode("utf-8")
-        print("📥 Raw Request Body (first 500 chars):", raw_data[:500])
+        data = request.json
+        if not data or "strokes" not in data:
+            return jsonify({"error": "Missing strokes field"}), 400
 
-        # Parse JSON
-        data = request.get_json(force=True)
-        print("📥 Parsed JSON keys:", list(data.keys()))
+        # Convert strokes to numpy format
+        strokes = np.array(data["strokes"], dtype=np.float32)
+        strokes = np.expand_dims(strokes, axis=0)
 
-        if "image" not in data:
-            return jsonify({"error": "Missing 'image' field"}), 400
+        # Run inference
+        infer = model.signatures["serving_default"]
+        preds = infer(tf.constant(strokes))["output_0"].numpy()[0]
 
-        # Convert to numpy
-        image = np.array(data["image"], dtype=np.float32).reshape(1, 28, 28, 1) / 255.0
-        print("✅ Image shape:", image.shape, "dtype:", image.dtype)
+        top_idx = int(np.argmax(preds))
+        top_category = categories[top_idx]
+        confidence = float(preds[top_idx])
 
-        # Predict
-        preds = model(image)[0].numpy()
-        guess_idx = int(np.argmax(preds))
-        guess = categories[guess_idx]
-
-        print("🤖 Guess:", guess)
-
-        return jsonify({"guess": guess}), 200
+        return jsonify({"category": top_category, "confidence": confidence})
 
     except Exception as e:
-        print("❌ Error in /predict:", str(e))
         return jsonify({"error": str(e)}), 500
-
-# 🔹 Entry point for Render/Gunicorn
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
