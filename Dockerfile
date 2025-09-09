@@ -1,26 +1,25 @@
-# Use official lightweight Python image
-FROM python:3.10-slim
+# Use an official lightweight Python image
+FROM python:3.13-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for numpy/tensorflow)
+# Install system dependencies (needed for TensorFlow, h5py, etc.)
 RUN apt-get update && apt-get install -y \
     build-essential \
-    python3-dev \
+    libhdf5-dev \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements.txt first (to leverage Docker cache)
+# Copy requirement files and install Python deps
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the project
+# Copy all project files (including model + categories)
 COPY . .
 
-# Expose the port Hugging Face/Render expects
+# Expose the Hugging Face Space port
 EXPOSE 7860
 
-# Start Flask server
-CMD ["python", "server.py"]
+# Run with gunicorn (production server)
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:7860"]
