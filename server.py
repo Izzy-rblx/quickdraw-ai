@@ -1,110 +1,116 @@
 import os
 import io
-import base64
 import hashlib
+import logging
 import numpy as np
 from flask import Flask, request, jsonify
-from tensorflow import keras
-from PIL import Image, ImageDraw
+from PIL import Image
+import tensorflow as tf
 
-# Flask app
+# -----------------------------------------------------------------------------
+# Flask setup
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
 
-# Load categories
-CATEGORIES_FILE = "categories.txt"
-with open(CATEGORIES_FILE, "r") as f:
-    categories = [line.strip() for line in f.readlines()]
-print(f"[SERVER LOG] 📚 Loaded {len(categories)} categories.")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("QuickDrawServer")
 
-# Helper: log
-def log(msg):
-    print(f"[SERVER LOG] {msg}", flush=True)
+# -----------------------------------------------------------------------------
+# Model setup
+# -----------------------------------------------------------------------------
+MODEL_PATH = "quickdraw_model.keras"
 
-# Helper: checksum
-def sha256sum(filename):
-    h = hashlib.sha256()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            h.update(chunk)
-    return h.hexdigest()
+if not os.path.exists(MODEL_PATH):
+    logger.error(f"❌ Model file not found: {MODEL_PATH}")
+    raise FileNotFoundError(f"{MODEL_PATH} missing, upload it first")
+
+# Log file info
+size = os.path.getsize(MODEL_PATH)
+logger.info(f"📦 Model file size: {size/1024:.2f} KB")
+
+with open(MODEL_PATH, "rb") as f:
+    checksum = hashlib.sha256(f.read()).hexdigest()
+logger.info(f"🔑 Model SHA256 checksum: {checksum}")
 
 # Load model
-MODEL_PATH = os.getenv("QUICKDRAW_MODEL_PATH", "quickdraw_model.keras")
-log(f"🔍 Looking for model at: {MODEL_PATH}")
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+    logger.info("✅ Model loaded successfully")
+except Exception as e:
+    logger.exception("❌ Failed to load model")
+    raise
 
-log(f"📦 Found model file at {MODEL_PATH}, size: {os.path.getsize(MODEL_PATH)/1024:.2f} KB")
-log(f"✅ Model checksum (sha256): {sha256sum(MODEL_PATH)}")
+# -----------------------------------------------------------------------------
+# Helper functions
+# -----------------------------------------------------------------------------
+def preprocess_bitmap(bitmap):
+    """Convert Roblox bitmap JSON → model input (28x28 grayscale)."""
+    logger.info("🖼️ Preprocessing bitmap...")
 
-# If mislabeled as .keras but actually h5
-if MODEL_PATH.endswith(".keras"):
-    with open(MODEL_PATH, "rb") as f:
-        header = f.read(8)
-    if not (header.startswith(b"\x89HDF") or header.startswith(b"\x93NUMPY")):
-        log("🔎 File has .keras extension but is NOT a zip; renaming to .h5")
-        new_path = MODEL_PATH.replace(".keras", ".h5")
-        os.rename(MODEL_PATH, new_path)
-        MODEL_PATH = new_path
+    try:
+        arr = np.array(bitmap, dtype=np.float32)
+        if arr.shape != (28, 28):
+            logger.warning(f"⚠️ Bitmap shape mismatch: got {arr.shape}, expected (28, 28)")
+            return None
+        arr = arr / 255.0  # normalize
+        arr = arr.reshape(1, 28, 28, 1)
+        return arr
+    except Exception as e:
+        logger.exception("❌ Failed during preprocessing")
+        return None
 
-# Load Keras model
-model = keras.models.load_model(MODEL_PATH)
-log("✅ Model loaded successfully.")
+def predict_image(arr):
+    """Run model prediction and return best class."""
+    try:
+        preds = model.predict(arr)
+        idx = np.argmax(preds[0])
+        confidence = float(np.max(preds[0]))
+        return idx, confidence
+    except Exception as e:
+        logger.exception("❌ Prediction failed")
+        return None, None
 
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
-def index():
+def root():
     return jsonify({"message": "QuickDraw AI API", "ok": True})
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({"error": "No JSON received"}), 400
+        data = request.get_json()
+        logger.info(f"📩 Incoming JSON: {str(data)[:300]}")  # truncate long logs
 
-        img = None
+        if not data or "image" not in data:
+            logger.warning("⚠️ Missing 'image' in payload")
+            return jsonify({"error": "Missing image"}), 400
 
-        # ✅ Prefer strokes input (Roblox case)
-        if "strokes" in data and isinstance(data["strokes"], list):
-            log("🖊 Using strokes input")
-            canvas = Image.new("L", (28, 28), 0)
-            draw = ImageDraw.Draw(canvas)
+        bitmap = data["image"]
+        arr = preprocess_bitmap(bitmap)
+        if arr is None:
+            return jsonify({"error": "Invalid bitmap"}), 400
 
-            for stroke in data["strokes"]:
-                points = [(int(p["x"] / 10), int(p["y"] / 10)) for p in stroke if "x" in p and "y" in p]
-                if len(points) > 1:
-                    draw.line(points, fill=255, width=1)
-                elif points:
-                    draw.point(points[0], fill=255)
+        idx, confidence = predict_image(arr)
+        if idx is None:
+            return jsonify({"error": "Prediction failed"}), 500
 
-            img = np.array(canvas).astype("float32") / 255.0
-            img = np.expand_dims(img, axis=(0, -1))
-
-        # ✅ Or base64 image input
-        elif "image" in data and isinstance(data["image"], str):
-            log("🖼 Using base64 image input")
-            img_bytes = base64.b64decode(data["image"])
-            img = Image.open(io.BytesIO(img_bytes)).convert("L").resize((28, 28))
-            img = np.array(img).astype("float32") / 255.0
-            img = np.expand_dims(img, axis=(0, -1))
-
-        else:
-            return jsonify({"error": "Invalid input format"}), 400
-
-        # Run prediction
-        preds = model.predict(img)
-        idx = int(np.argmax(preds[0]))
-        guess = categories[idx] if 0 <= idx < len(categories) else "unknown"
-
-        log(f"🤖 Prediction: {guess} (index {idx})")
-        return jsonify({"guess": guess})
+        result = {
+            "guess": str(idx),
+            "confidence": round(confidence, 4)
+        }
+        logger.info(f"✅ Prediction: {result}")
+        return jsonify(result)
 
     except Exception as e:
-        log(f"❌ Error in /predict: {e}")
-        return jsonify({"error": str(e)}), 500
+        logger.exception("❌ Unexpected error in /predict")
+        return jsonify({"error": "Server error"}), 500
 
-# Run app
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    log(f"🚀 Starting server on port {port}")
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"🚀 Starting server on port {port}")
     app.run(host="0.0.0.0", port=port)
