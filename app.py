@@ -1,21 +1,33 @@
 from flask import Flask, request, jsonify
 import numpy as np
 import tensorflow as tf
+import os
 
-# ✅ Correct model file name
-MODEL_PATH = "quickdraw_model.h5"
-model = tf.keras.models.load_model(MODEL_PATH)
+# Model paths
+MODEL_PATH_H5 = "quickdraw_model.h5"
+MODEL_PATH_DIR = "quickdraw_saved_model"
 
-# ✅ Categories (can be expanded / loaded from categories.txt if you prefer)
-CATEGORIES = [
-    "apple", "banana", "car", "cat", "dog", "house", "tree"
-]
+# Load model (try .h5 first, then SavedModel folder)
+if os.path.exists(MODEL_PATH_H5):
+    model = tf.keras.models.load_model(MODEL_PATH_H5)
+elif os.path.exists(MODEL_PATH_DIR):
+    model = tf.keras.models.load_model(MODEL_PATH_DIR)
+else:
+    raise FileNotFoundError("No model file (.h5) or SavedModel directory found")
+
+# Load categories
+if os.path.exists("categories.txt"):
+    with open("categories.txt", "r") as f:
+        CATEGORIES = [line.strip() for line in f.readlines()]
+else:
+    # fallback if categories.txt not found
+    CATEGORIES = ["apple", "banana", "car", "cat", "dog", "house", "tree"]
 
 app = Flask(__name__)
 
 def preprocess_strokes(strokes, size=28):
     """
-    Convert stroke data from Roblox into a bitmap for the model.
+    Convert stroke data into a 28x28 bitmap for the model
     """
     bitmap = np.zeros((size, size), dtype=np.uint8)
     for stroke in strokes:
@@ -46,15 +58,12 @@ def predict():
         idx = int(np.argmax(preds[0]))
         guess = CATEGORIES[idx] if idx < len(CATEGORIES) else "?"
 
-        return jsonify({
-            "guess": guess,
-            "confidence": float(np.max(preds[0]))
-        })
+        return jsonify({"guess": guess, "confidence": float(np.max(preds[0]))})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    # Hugging Face Spaces runs on port 7860
+    # Port 7860 for Hugging Face Spaces
     app.run(host="0.0.0.0", port=7860)
