@@ -1,10 +1,11 @@
 import os
 import logging
 import hashlib
+import json
+import time
 import tensorflow as tf
 import numpy as np
 from flask import Flask, request, jsonify
-from PIL import Image
 
 # ---------------------------------------------------------------------
 # Setup logging
@@ -15,8 +16,11 @@ logger = logging.getLogger("QuickDrawServer")
 # ---------------------------------------------------------------------
 # Model + categories setup
 # ---------------------------------------------------------------------
-MODEL_PATH = os.getenv("QUICKDRAW_MODEL_PATH", "quickdraw_model.h5")  # ✅ now uses .h5
+MODEL_PATH = os.getenv("QUICKDRAW_MODEL_PATH", "quickdraw_model.h5")
 CATEGORIES_FILE = os.getenv("CATEGORIES_FILE", "categories.txt")
+DATA_DIR = os.getenv("DATA_DIR", "data")  # folder to save player drawings
+
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Log working directory and files
 logger.info("📂 Current working directory: %s", os.getcwd())
@@ -81,28 +85,65 @@ def predict():
         img = np.expand_dims(img, axis=(0, -1))  # shape (1, 28, 28, 1)
 
         # Predict
-        preds = model.predict(img)[0]  # shape (num_classes,)
-        top_indices = np.argsort(preds)[::-1][:5]  # top 5 predictions
+        preds = model.predict(img)
+        pred_idx = int(np.argmax(preds))
+        confidence = float(np.max(preds))
 
-        top_predictions = [
-            {
-                "label": categories[i] if categories and i < len(categories) else str(i),
-                "confidence": float(preds[i])
-            }
-            for i in top_indices
-        ]
-
-        # Log top 5 for debugging
-        logger.info("🔮 Top predictions: %s", top_predictions)
+        guess = categories[pred_idx] if categories and pred_idx < len(categories) else str(pred_idx)
 
         return jsonify({
-            "top_predictions": top_predictions,
-            "guess": top_predictions[0]["label"],
-            "confidence": top_predictions[0]["confidence"]
+            "guess": guess,
+            "confidence": confidence
         })
 
     except Exception as e:
         logger.error("Prediction error", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/submit", methods=["POST"])
+def submit():
+    """
+    Save player drawing + true word into dataset folder.
+    """
+    try:
+        data = request.get_json()
+        if not data or "image" not in data or "label" not in data:
+            return jsonify({"error": "Missing 'image' or 'label'"}), 400
+
+        bitmap = np.array(data["image"], dtype=np.uint8)
+        if bitmap.shape != (28, 28):
+            return jsonify({"error": f"Invalid image shape {bitmap.shape}, expected (28,28)"}), 400
+
+        label = str(data["label"]).strip().lower()
+        player_id = str(data.get("player_id", "unknown"))
+        round_id = str(data.get("round", "0"))
+        timestamp = int(time.time())
+
+        # Save directory per label
+        label_dir = os.path.join(DATA_DIR, label)
+        os.makedirs(label_dir, exist_ok=True)
+
+        # Save as .npy (numpy array)
+        filename = f"{player_id}_r{round_id}_{timestamp}.npy"
+        filepath = os.path.join(label_dir, filename)
+        np.save(filepath, bitmap)
+
+        # Save metadata as JSON
+        meta = {
+            "player_id": player_id,
+            "round": round_id,
+            "timestamp": timestamp,
+            "label": label,
+            "file": filename
+        }
+        with open(filepath.replace(".npy", ".json"), "w") as f:
+            json.dump(meta, f)
+
+        logger.info("💾 Saved drawing for label '%s' at %s", label, filepath)
+        return jsonify({"status": "saved", "file": filename})
+
+    except Exception as e:
+        logger.error("Submit error", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 # ---------------------------------------------------------------------
